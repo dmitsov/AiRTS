@@ -176,20 +176,19 @@ class ConvAgent(nn.Module):
 
 
 class LSTMEncoder(nn.Module):
-    def __init__(self, env, device, mapsize=16 * 16):
+    def __init__(self, env, device, layer_count=1, mapsize=16 * 16):
         super(LSTMEncoder, self).__init__()
         self.mapsize = 16*16
         self.envs = env
         _, _, c = env.observation_space.shape
         self.hidden_size = 512
-        self.layer_count = 1
+        self.layer_count = layer_count
         self.output_size = 512
         self.input_size = 1024
         self.hidden_value = None
         self.c_value = None
         self.conv_transpose_in_channels = 32
         self.device = device
-
 
         self.CNNs = nn.Sequential(
             Transpose((0, 3, 1, 2)),
@@ -279,6 +278,7 @@ class LSTMEncoder(nn.Module):
         #     #print("x.size ", x.size)
 
         #print("x ", x.shape)
+    
 
         encoded_value = self.CNNs(x)
         encoded_value = encoded_value.view(batch_size, 1, -1)
@@ -291,9 +291,10 @@ class LSTMEncoder(nn.Module):
         if hidden_states is None:
             out, (h_out, c_out) = self.lstmCore(encoded_value)
         else:
-            hidden_states = hidden_states.view(1, batch_size, -1).to(self.device)
-            c_values = c_values.view(1, batch_size, -1).to(self.device)
+            hidden_states = hidden_states.view(self.layer_count, batch_size, -1).to(self.device)
+            c_values = c_values.view(self.layer_count, batch_size, -1).to(self.device)
             out, (h_out, c_out) = self.lstmCore(encoded_value, (hidden_states, c_values))
+            out = out[-1]
         #print("h_out ", h_out.shape)
         
         out = out + encoded_value
@@ -386,9 +387,14 @@ class LSTMEncoder(nn.Module):
 
         encoded_value = self.CNNs(x)
         encoded_value = encoded_value.view(1, batch_size, -1).to(self.device)
+        hidden_state = hidden_state.view(self.layer_count, batch_size, -1)
+        c_value = c_value.view(self.layer_count, batch_size, -1)
+
         out, (h_out, c_out) = self.lstmCore(encoded_value, (hidden_state, c_value))
         out = out + encoded_value
         return self.critic_head(out), (h_out, c_out)
+
+
 
 class RtsDataset(Dataset):
     
@@ -475,34 +481,55 @@ class PPO:
         self.hidden_states[step_number] = hidden_value
         self.c_values[step_number] = c_value
 
-    def initialize_transitions(self,env, mapsize):
+    def initialize_transitions(self,env, layer_count, mapsize):
         action_space_shape = (mapsize, len(envs.action_plane_space.nvec))
         invalid_action_shape = (mapsize, envs.action_plane_space.nvec.sum())
 
-        self.states = torch.zeros((self.num_steps, 1) + env.observation_space.shape).to(device)
-        self.actions = torch.zeros((self.num_steps, 1) + action_space_shape).to(device)
-        self.rewards = torch.zeros((self.num_steps, 1)).to(device)
-        self.log_probs = torch.zeros((self.num_steps, 1)).to(device)
-        self.next_states = torch.zeros((self.num_steps, 1) + env.observation_space.shape).to(device)
-        self.dones = torch.zeros((self.num_steps, 1)).to(device)
-        self.values = torch.zeros((self.num_steps, 1)).to(device)
-        self.advantages = torch.zeros((self.num_steps, 1)).to(device)
-        self.returns = torch.zeros((self.num_steps)).to(device)
-        self.invalid_action_masks = torch.zeros((self.num_steps, 1) + invalid_action_shape).to(device)
-        self.hidden_states = torch.zeros((self.num_steps, self.hidden_state_size))
-        self.c_values = torch.zeros((self.num_steps, self.hidden_state_size))
+        self.states = torch.zeros((self.num_steps, 1) + env.observation_space.shape).to(self.device)
+        self.actions = torch.zeros((self.num_steps, 1) + action_space_shape).to(self.device)
+        self.rewards = torch.zeros((self.num_steps, 1)).to(self.device)
+        self.log_probs = torch.zeros((self.num_steps, 1)).to(self.device)
+        self.next_states = torch.zeros((self.num_steps, 1) + env.observation_space.shape).to(self.device)
+        self.dones = torch.zeros((self.num_steps, 1)).to(self.device)
+        self.values = torch.zeros((self.num_steps, 1)).to(self.device)
+        self.advantages = torch.zeros((self.num_steps, 1)).to(self.device)
+        self.returns = torch.zeros((self.num_steps)).to(self.device)
+        self.invalid_action_masks = torch.zeros((self.num_steps, 1) + invalid_action_shape).to(self.device)
+        self.hidden_states = torch.zeros((self.num_steps, layer_count, self.hidden_state_size)).to(self.device)
+        self.c_values = torch.zeros((self.num_steps, layer_count, self.hidden_state_size)).to(self.device)
 
-    def prepare_loader(self):
+    def prepare_loader(self, env, layer_count):
+        # blank_frame = torch.zeros(env.observation_space.shape).to(device)
+        # initial_hidden_values = []
+        # initial_c_values = []
+        # for i in range(layer_count-1):
+        #     blank_part_hidden = [torch.zeros_like(blank_frame) for j in range(layer_count - 1 - i)]
+        #     blank_part_c = [torch.zeros_like(blank_frame) for j in range(layer_count - 1 - i)]
+        #     frame_part_hidden = self.hidden_states[0:i]
+        #     frame_part_c = self.c_values[0:i]
+        #     h_entry = torch.stack([*blank_part_hidden, *frame_part_hidden])
+        #     c_entry = torch.stack([*blank_part_c, *frame_part_c])
+
+        #     initial_hidden_values.append(h_entry)
+        #     initial_c_values.append(c_entry)
+
+
+        # hidden_states = [self.hidden_states[i:i+layer_count] for i in range(len(self.hidden_states) - (layer_count - 1))]
+        # c_values = [self.c_values[i:i+layer_count] for i in range(len(self.c_values) - (layer_count - 1))]
+
+        # hidden_states = [*initial_hidden_values, *hidden_states]
+        # c_values = [*initial_c_values, *c_values]
+
         rtsDataset = RtsDataset(self.states, self.actions, self.log_probs, self.rewards, self.next_states, self.dones, self.values, self.invalid_action_masks, self.hidden_states, self.c_values)
         dataloader = DataLoader(rtsDataset, batch_size=self.batch_size,
                         shuffle=True, num_workers=0)
         
         return dataloader
     
-    def update_agent(self, agent, optimizer, writer):
+    def update_agent(self, env, agent, optimizer, writer):
 
         #self.calculate_advantages(agent)
-        steps_loader = self.prepare_loader()
+        steps_loader = self.prepare_loader(env, agent)
         value_loss = None
         action_loss = None
         print("updating agent")
@@ -661,18 +688,17 @@ class PPO:
         next_state = torch.Tensor(env.reset()).to(self.device)
 
         if self.e_hidden_value is None:# or self.global_step % 2000 == 0:
-            self.e_hidden_value = torch.zeros((1,512)).to(self.device)
+            self.e_hidden_value = torch.zeros((agent.layer_count,512)).to(self.device)
         
         if self.e_c_value is None:# or self.global_step % 2000 == 0:
-            self.e_c_value = torch.zeros((1,512)).to(self.device)
+            self.e_c_value = torch.zeros((agent.layer_count,512)).to(self.device)
 
-        self.initialize_transitions(env, mapsize)
+        self.initialize_transitions(env, agent.layer_count, mapsize)
 
         for s in range(0, self.num_steps):
             self.global_step += 1
             invalid_action_mask = torch.tensor(env.get_action_mask()).to(self.device)
             with torch.no_grad():
-                print("State shape: ", next_state.shape)
                 state = next_state
                 action, logprob, _, value, h_out, c_out = agent.get_action_and_value(state, action=None, invalid_action_masks=invalid_action_mask, hidden_states=self.e_hidden_value, c_values=self.e_c_value )
                 old_hidden_value = self.e_hidden_value
@@ -680,11 +706,11 @@ class PPO:
 
                 next_state, reward, done, infos = env.step(action.cpu().numpy().reshape(envs.num_envs, -1))
                 if done:
-                    self.e_hidden_value = torch.zeros((1,512)).to(self.device)
+                    self.e_hidden_value = torch.zeros((agent.layer_count,512)).to(self.device)
                 else:
-                    self.e_hidden_value = h_out
+                    self.e_hidden_value = h_out.view(agent.layer_count, 512)
                 
-                self.e_c_value = c_out
+                self.e_c_value = c_out.view(agent.layer_count, 512)
                 
                 next_state, reward, done = torch.Tensor(next_state).to(self.device), torch.Tensor(reward).to(self.device), torch.Tensor(done).to(self.device)
                 for info in infos:
@@ -745,7 +771,7 @@ class PPO:
             lrnow = lr(frac)
             optimizer.param_groups[0]["lr"] = lrnow
             
-            action_loss, value_loss = self.update_agent(agent, optimizer, writer)
+            action_loss, value_loss = self.update_agent(env, agent, optimizer, writer)
 
             agent.add_weights_to_histogram(writer, self.global_step)
             if i % 10 == 0:
@@ -831,8 +857,8 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = True
 
     envs = MicroRTSGridModeVecEnv(
-        num_selfplay_envs=2,
-        num_bot_envs=0,
+        num_selfplay_envs=0,
+        num_bot_envs=1,
         partial_obs=False,
         max_steps=2000,
         render_theme=2,
@@ -840,7 +866,7 @@ if __name__ == "__main__":
         # + [microrts_ai.randomBiasedAI for _ in range(min(args.num_bot_envs, 2))]
         # + [microrts_ai.lightRushAI for _ in range(min(args.num_bot_envs, 2))]
         # + [microrts_ai.workerRushAI for _ in range(min(args.num_bot_envs, 2))],
-        ai2s = [], #[microrts_ai.workerRushAI],
+        ai2s = [microrts_ai.workerRushAI],
         map_paths = ["maps/16x16/basesWorkers16x16A.xml"],
         cycle_maps= ["maps/16x16/basesWorkers16x16A.xml"],
         reward_weight=np.array([10.0, 1.0, 1.0, 0.2, 1.0, 4.0]),
@@ -851,11 +877,11 @@ if __name__ == "__main__":
     assert isinstance(envs.action_space, MultiDiscrete), "only MultiDiscrete action space is supported"
     envs.reset()    
 
-    agent = LSTMEncoder(envs, device).to(device)
+    agent = LSTMEncoder(envs, device, layer_count=16).to(device)
     convAgent = ConvAgent(envs).to(device)
     runs = [dict(
         {
-            'name': 'ppo_lstm_5_test',
+            'name': 'ppo_lstm_7_multi_layer',
             'batch_size': 512,
             'num_steps': 2048,
             'num_updates': 1000,
